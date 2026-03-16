@@ -28,6 +28,20 @@
 // Prestrafe ratio will be not go down after landing for this amount of time - helps with small movements after landing
 // Ideally should be much higher than the perf window!
 #define PS_LANDING_GRACE_PERIOD 0.25f
+// WAD prestrafe related
+#define WAD_REFERENCE_TICKRATE       128.0f
+#define WAD_PRE_VELMOD_MAX           1.104f // 276 / 250
+#define WAD_PRE_TURN_THRESHOLD       1.04f
+#define WAD_PRE_SPEED_THRESHOLD      248.9f
+#define WAD_PRE_IDLE_RESET_TIME      0.2f
+#define WAD_PRE_OVERSHOOT_PENALTY    0.007f
+#define WAD_PRE_OVERSHOOT_RETURN     0.001f
+#define WAD_PRE_INCREMENT            0.0009f
+#define WAD_PRE_INCREMENT_FAST       0.001f
+#define WAD_PRE_WRONG_DIR_PUNISH     0.04f
+#define WAD_PRE_CYCLE_PUNISH         0.0045f
+#define WAD_PRE_CYCLE_TICKS          75.0f
+#define WAD_PRE_CYCLE_RECOVER_TICKS  2.0f
 // Bhop related
 #define BH_PERF_WINDOW                  0.02f // Any jump performed after landing will be a perf for this much time
 #define BH_BASE_MULTIPLIER              51.5f // Multiplier for how much speed would a perf gain in ideal scenario
@@ -159,6 +173,10 @@ class KZClassicModeService : public KZModeService
 	f32 leftPreRatio {};
 	f32 rightPreRatio {};
 	f32 bonusSpeed {};
+	f32 wadPreVelMod {1.0f};
+	f32 wadPreEffectiveVelMod {1.0f};
+	f32 wadPreLastChange {};
+	f32 wadPreTickCounter {};
 	f32 maxPre {};
 	f32 originalMaxSpeed {};
 	f32 tweakedMaxSpeed {};
@@ -214,7 +232,11 @@ public:
 
 	void UpdateAngleHistory();
 	void CalcPrestrafe();
-	f32 GetPrestrafeGain();
+	void CalcWADPrestrafe();
+	f32 GetMoveDirection() const;
+	f32 GetTurnPrestrafeGain() const;
+	f32 GetWADPrestrafeGain() const;
+	f32 GetPrestrafeGain() const;
 
 	void CheckVelocityQuantization();
 	void RemoveCrouchJumpBind();

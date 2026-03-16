@@ -107,6 +107,10 @@ void KZClassicModeService::Reset()
 	this->leftPreRatio = {};
 	this->rightPreRatio = {};
 	this->bonusSpeed = {};
+	this->wadPreVelMod = 1.0f;
+	this->wadPreEffectiveVelMod = 1.0f;
+	this->wadPreLastChange = {};
+	this->wadPreTickCounter = {};
 	this->maxPre = {};
 
 	this->didTPM = {};
@@ -171,22 +175,22 @@ void KZClassicModeService::OnStopTouchGround()
 {
 	Vector velocity;
 	this->player->GetVelocity(&velocity);
-	f32 speed = velocity.Length2D();
 
 	f32 timeOnGround = this->player->takeoffTime - this->player->landingTime;
 	// Perf
 	if (timeOnGround <= BH_PERF_WINDOW && !this->player->possibleLadderHop)
 	{
 		this->player->inPerf = true;
+		const f32 prestrafeGain = this->GetPrestrafeGain();
 		// Perf speed
 		Vector2D landingVelocity2D(this->player->landingVelocity.x, this->player->landingVelocity.y);
 		landingVelocity2D.NormalizeInPlace();
 		float newSpeed = MAX(this->player->landingVelocity.Length2D(), this->player->takeoffVelocity.Length2D());
-		if (newSpeed > SPEED_NORMAL + this->GetPrestrafeGain())
+		if (newSpeed > SPEED_NORMAL + prestrafeGain)
 		{
 			newSpeed = MIN(newSpeed, (BH_BASE_MULTIPLIER - timeOnGround * BH_LANDING_DECREMENT_MULTIPLIER) * log(newSpeed) - BH_NORMALIZE_FACTOR);
 			// Make sure it doesn't go lower than the ground speed.
-			newSpeed = MAX(newSpeed, SPEED_NORMAL + this->GetPrestrafeGain());
+			newSpeed = MAX(newSpeed, SPEED_NORMAL + prestrafeGain);
 		}
 		velocity.x = newSpeed * landingVelocity2D.x;
 		velocity.y = newSpeed * landingVelocity2D.y;
@@ -303,6 +307,7 @@ void KZClassicModeService::OnProcessMovement()
 	this->InterpolateViewAngles();
 	this->UpdateAngleHistory();
 	this->CalcPrestrafe();
+	this->CalcWADPrestrafe();
 }
 
 void KZClassicModeService::OnPlayerMove()
@@ -523,7 +528,7 @@ void KZClassicModeService::CalcPrestrafe()
 		this->rightPreRatio += averageRate < -PS_MIN_REWARD_RATE ? rewardRate : -punishRate;
 		this->leftPreRatio = Clamp(leftPreRatio, 0.0f, PS_MAX_PS_TIME);
 		this->rightPreRatio = Clamp(rightPreRatio, 0.0f, PS_MAX_PS_TIME);
-		this->bonusSpeed = this->GetPrestrafeGain() / SPEED_NORMAL * velocity.Length2D();
+		this->bonusSpeed = this->GetTurnPrestrafeGain() / SPEED_NORMAL * velocity.Length2D();
 	}
 	else
 	{
@@ -540,9 +545,125 @@ void KZClassicModeService::CalcPrestrafe()
 	}
 }
 
-f32 KZClassicModeService::GetPrestrafeGain()
+void KZClassicModeService::CalcWADPrestrafe()
+{
+	// KZTimer keeps a persisted velmod but sometimes returns a different effective value
+	// without mutating the stored state. Preserve that behavior for the WAD speed cycle.
+	if ((this->player->GetPlayerPawn()->m_fFlags & FL_ONGROUND) == 0)
+	{
+		this->wadPreEffectiveVelMod = this->wadPreVelMod;
+		return;
+	}
+
+	const TurnState turning = this->player->GetTurning();
+	if (turning == TURN_NONE)
+	{
+		this->wadPreEffectiveVelMod = this->wadPreVelMod;
+		if (g_pKZUtils->GetGlobals()->curtime - this->wadPreLastChange > WAD_PRE_IDLE_RESET_TIME)
+		{
+			this->wadPreVelMod = 1.0f;
+			this->wadPreEffectiveVelMod = 1.0f;
+			this->wadPreLastChange = g_pKZUtils->GetGlobals()->curtime;
+		}
+		else if (this->wadPreVelMod > WAD_PRE_VELMOD_MAX + WAD_PRE_OVERSHOOT_PENALTY)
+		{
+			this->wadPreEffectiveVelMod = WAD_PRE_VELMOD_MAX - WAD_PRE_OVERSHOOT_RETURN;
+		}
+		return;
+	}
+
+	const bool moveLeft = this->player->IsButtonPressed(IN_MOVELEFT);
+	const bool moveRight = this->player->IsButtonPressed(IN_MOVERIGHT);
+	Vector velocity;
+	this->player->GetVelocity(&velocity);
+	if ((!moveLeft && !moveRight) || velocity.Length2D() <= WAD_PRE_SPEED_THRESHOLD)
+	{
+		this->wadPreTickCounter = 0.0f;
+		this->wadPreEffectiveVelMod = 1.0f;
+		return;
+	}
+
+	const bool forwards = this->GetMoveDirection() > 0.0f;
+	const bool rewardingTurn = ((moveRight && turning == TURN_RIGHT) || (turning == TURN_LEFT && !forwards)
+								|| (moveLeft && turning == TURN_LEFT) || (turning == TURN_RIGHT && !forwards));
+	const f32 tickScale = g_pKZUtils->GetGlobals()->frametime * WAD_REFERENCE_TICKRATE;
+
+	if (rewardingTurn)
+	{
+		this->wadPreTickCounter += tickScale;
+
+		if (this->wadPreTickCounter < WAD_PRE_CYCLE_TICKS)
+		{
+			f32 increment = this->wadPreVelMod > WAD_PRE_TURN_THRESHOLD ? WAD_PRE_INCREMENT_FAST : WAD_PRE_INCREMENT;
+			increment *= tickScale;
+			this->wadPreVelMod += increment;
+			if (this->wadPreVelMod > WAD_PRE_VELMOD_MAX)
+			{
+				if (this->wadPreVelMod > WAD_PRE_VELMOD_MAX + WAD_PRE_OVERSHOOT_PENALTY)
+				{
+					this->wadPreVelMod = WAD_PRE_VELMOD_MAX - WAD_PRE_OVERSHOOT_RETURN;
+				}
+				else
+				{
+					this->wadPreVelMod -= WAD_PRE_OVERSHOOT_PENALTY;
+				}
+			}
+			this->wadPreVelMod += increment;
+		}
+		else
+		{
+			this->wadPreVelMod -= WAD_PRE_CYCLE_PUNISH * tickScale;
+			this->wadPreTickCounter -= WAD_PRE_CYCLE_RECOVER_TICKS * tickScale;
+
+			if (this->wadPreVelMod < 1.0f)
+			{
+				this->wadPreVelMod = 1.0f;
+				this->wadPreTickCounter = 0.0f;
+			}
+		}
+	}
+	else
+	{
+		this->wadPreVelMod -= WAD_PRE_WRONG_DIR_PUNISH * tickScale;
+		if (this->wadPreVelMod < 1.0f)
+		{
+			this->wadPreVelMod = 1.0f;
+		}
+	}
+
+	this->wadPreLastChange = g_pKZUtils->GetGlobals()->curtime;
+	this->wadPreEffectiveVelMod = this->wadPreVelMod;
+}
+
+f32 KZClassicModeService::GetMoveDirection() const
+{
+	Vector velocity = this->player->currentMoveData ? this->player->currentMoveData->m_vecVelocity : this->player->moveDataPost.m_vecVelocity;
+	QAngle viewAngles = this->player->currentMoveData ? this->player->currentMoveData->m_vecViewAngles : this->player->moveDataPost.m_vecViewAngles;
+	viewAngles.x = Clamp(viewAngles.x, -70.0f, 70.0f);
+
+	Vector viewDirection;
+	Vector right;
+	Vector up;
+	AngleVectors(viewAngles, &viewDirection, &right, &up);
+
+	VectorNormalize(velocity);
+	VectorNormalize(viewDirection);
+	return DotProduct(velocity, viewDirection);
+}
+
+f32 KZClassicModeService::GetTurnPrestrafeGain() const
 {
 	return PS_SPEED_MAX * pow(MAX(this->leftPreRatio, this->rightPreRatio) / PS_MAX_PS_TIME, PS_RATIO_TO_SPEED);
+}
+
+f32 KZClassicModeService::GetWADPrestrafeGain() const
+{
+	return MAX(this->wadPreEffectiveVelMod - 1.0f, 0.0f) * SPEED_NORMAL;
+}
+
+f32 KZClassicModeService::GetPrestrafeGain() const
+{
+	return MAX(this->GetTurnPrestrafeGain(), this->GetWADPrestrafeGain());
 }
 
 void KZClassicModeService::CheckVelocityQuantization()
